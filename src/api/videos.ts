@@ -1,11 +1,12 @@
 import { getBearerToken, validateJWT } from "../auth";
 import { respondWithJSON } from "./json";
-import { getVideo, updateVideo } from "../db/videos";
+import { getVideo, updateVideo, type Video } from "../db/videos";
 import type { ApiConfig } from "../config";
-import { S3Client, type BunRequest } from "bun";
+import { s3, type BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -55,21 +56,25 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   await Bun.write(filePath, data, { createPath: true });
 
   const aspectRatio = await getVideoAspectRatio(filePath);
-  const s3FilePath = path.join(cfg.assetsRoot, aspectRatio, "/", key);
+  const s3Key = `${aspectRatio}/${key}`;
   const processedFilePath = await processVideoForFastStart(filePath);
-  const tmpFile = Bun.file(processedFilePath);
-  await cfg.s3Client.write(s3FilePath, tmpFile);
+  const tmpFile = Bun.file(filePath);
+  
+  const s3file = cfg.s3Client.file(s3Key, { bucket: cfg.s3Bucket });
+  const tmpFileProcessed = Bun.file(processedFilePath);
+  await s3file.write(tmpFileProcessed, { type: mediaType });
 
-  video.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${s3FilePath}`;
+  video.videoURL = `https://${cfg.s3CfDistribution}/${s3Key}`;
+  console.log("videoURL --- " + video.videoURL);
 
   updateVideo(cfg.db, video);
 
+  await tmpFileProcessed.delete();
   await tmpFile.delete();
   return respondWithJSON(200, video);
 }
 
-
-export async function getVideoAspectRatio(filePath: string) {
+async function getVideoAspectRatio(filePath: string) {
   const process = Bun.spawn([
     "ffprobe",
     "-v",
@@ -109,19 +114,24 @@ export async function getVideoAspectRatio(filePath: string) {
   }
 }
 
-
-export async function processVideoForFastStart(filePath: string) {
+async function processVideoForFastStart(filePath: string) {
   const newFilePath = filePath.concat(".processed");
   console.log(newFilePath);
   const process = Bun.spawn([
-    "ffmpeg", 
-    "-i", filePath,
-    "-movflags", "faststart",
-    "-map_metadata", "0",
-    "-codec", "copy",
-    "-f", "mp4", newFilePath,
+    "ffmpeg",
+    "-i",
+    filePath,
+    "-movflags",
+    "faststart",
+    "-map_metadata",
+    "0",
+    "-codec",
+    "copy",
+    "-f",
+    "mp4",
+    newFilePath,
   ]);
-  
+
   const exitCode = await process.exited;
 
   if (exitCode !== 0) {
@@ -129,3 +139,25 @@ export async function processVideoForFastStart(filePath: string) {
   }
   return newFilePath;
 }
+
+// function generatePresignedURL(cfg: ApiConfig, key: string, expireTime: number) {
+//   const s3Key = `s3://${cfg.s3Bucket}/${key.replace(/^\/+/, "")}`;
+//   console.log("s3Key --- " + s3Key);
+
+//   const url = s3.presign(key, {
+//     expiresIn: expireTime, // e.g. 3600 = 1 hour
+//     method: "GET",
+//     acl: "public-read",
+//   });
+//   console.log("url --- " + url);
+//   return url;
+// }
+
+
+// export function dbVideoToSignedVideo(cfg: ApiConfig, video: Video) {
+//   if (!video?.videoURL) return video;
+
+//   // Only the S3 key should be passed
+//   const signedURL = generatePresignedURL(cfg, video.videoURL, 3600);
+//   return { ...video, videoURL: signedURL };
+// }
